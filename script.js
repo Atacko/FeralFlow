@@ -8,6 +8,11 @@ class E621Feed {
     this.observer = null
     this.lastPostId = null
 
+    this.isAuthenticated = false
+    this.username = null
+    this.apiKey = null
+    this.currentView = "feed"
+
     this.init()
   }
 
@@ -15,6 +20,126 @@ class E621Feed {
     this.setupEventListeners()
     this.setupInfiniteScroll()
     this.loadInitialPosts()
+    this.checkSavedAuth()
+  }
+
+  checkSavedAuth() {
+    const savedAuth = localStorage.getItem("e621_auth")
+    if (savedAuth) {
+      try {
+        const auth = JSON.parse(savedAuth)
+        this.username = auth.username
+        this.apiKey = auth.apiKey
+        this.isAuthenticated = true
+        console.log("User authenticated as:", this.username)
+      } catch (error) {
+        console.log("Invalid saved auth, clearing")
+        localStorage.removeItem("e621_auth")
+      }
+    }
+  }
+
+  saveAuth(username, apiKey) {
+    this.username = username
+    this.apiKey = apiKey
+    this.isAuthenticated = true
+    localStorage.setItem("e621_auth", JSON.stringify({ username, apiKey }))
+  }
+
+  logout() {
+    this.username = null
+    this.apiKey = null
+    this.isAuthenticated = false
+    localStorage.removeItem("e621_auth")
+    this.showFeed()
+  }
+
+  async authenticateUser(username, apiKey) {
+    try {
+      if (!username || !apiKey || username.trim() === "" || apiKey.trim() === "") {
+        return false
+      }
+
+      if (apiKey.length < 20) {
+        return false
+      }
+
+      this.saveAuth(username.trim(), apiKey.trim())
+      return true
+    } catch (error) {
+      console.error("Authentication error:", error)
+      return false
+    }
+  }
+
+  async addToFavorites(postId) {
+    if (!this.isAuthenticated) {
+      alert("Please log in to add favorites")
+      return false
+    }
+
+    try {
+      const favoriteUrl = `https://e621.net/favorites.json`
+
+      const response = await fetch(favoriteUrl, {
+        method: "POST",
+        headers: {
+          "User-Agent": "E621Feed/1.0 (by " + this.username + " on e621)",
+          Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: `post_id=${postId}`,
+      })
+
+      if (response.ok) {
+        return true
+      } else if (response.status === 401) {
+        alert("Authentication failed. Please check your login credentials.")
+        this.logout()
+        return false
+      } else {
+        console.error("Favorites API error:", response.status)
+        return false
+      }
+    } catch (error) {
+      console.error("Error adding to favorites:", error)
+      return true
+    }
+  }
+
+  async removeFromFavorites(postId) {
+    if (!this.isAuthenticated) {
+      alert("Please log in to manage favorites")
+      return false
+    }
+
+    try {
+      const favoriteUrl = `https://e621.net/favorites/${postId}.json`
+
+      const response = await fetch(favoriteUrl, {
+        method: "DELETE",
+        headers: {
+          "User-Agent": "E621Feed/1.0 (by " + this.username + " on e621)",
+          Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
+        },
+      })
+
+      if (response.ok) {
+        return true
+      } else if (response.status === 401) {
+        alert("Authentication failed. Please check your login credentials.")
+        this.logout()
+        return false
+      } else if (response.status === 404) {
+        return true
+      } else {
+        console.error("Remove favorites API error:", response.status)
+        return false
+      }
+    } catch (error) {
+      console.error("Error removing from favorites:", error)
+      return true
+    }
   }
 
   setupEventListeners() {
@@ -131,7 +256,6 @@ class E621Feed {
         if (this.currentPage > 1) {
           console.log("Resetting to page 1 for endless scroll")
           this.currentPage = 1
-          // Try loading page 1 again
           const resetPosts = await this.fetchE621Posts(tagsToUse, 1)
           if (resetPosts.length > 0) {
             console.log("Reset successful, got", resetPosts.length, "posts")
@@ -220,8 +344,10 @@ class E621Feed {
             created_at: post.created_at,
             rating: post.rating || "s",
             description: post.description || "",
+            uploader_id: post.uploader_id,
+            uploader_name: post.uploader_name || "Anonymous",
           }))
-          .filter((post) => post.file.url) // Only include posts with valid image URLs
+          .filter((post) => post.file.url)
       } else {
         throw new Error("Invalid API response format")
       }
@@ -238,6 +364,59 @@ class E621Feed {
     }
   }
 
+  async fetchUserProfile(userId) {
+    if (!userId) return null
+
+    try {
+      const userUrl = `https://e621.net/users/${userId}.json`
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(userUrl)}`
+
+      const response = await fetch(proxyUrl, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      })
+
+      if (!response.ok) {
+        return null
+      }
+
+      const data = await response.json()
+      const userData = JSON.parse(data.contents)
+
+      return userData.avatar_id || null
+    } catch (error) {
+      console.log("Could not fetch user profile:", error)
+      return null
+    }
+  }
+
+  async getProfilePictureUrl(post) {
+    if (!post.uploader_id) {
+      return null
+    }
+
+    try {
+      const avatarId = await this.fetchUserProfile(post.uploader_id)
+      if (avatarId) {
+        const avatarUrl = `https://e621.net/posts/${avatarId}.json`
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(avatarUrl)}`
+
+        const response = await fetch(proxyUrl)
+        if (response.ok) {
+          const data = await response.json()
+          const avatarData = JSON.parse(data.contents)
+          return avatarData.post?.preview?.url || null
+        }
+      }
+    } catch (error) {
+      console.log("Could not fetch avatar:", error)
+    }
+
+    return null
+  }
+
   renderNewPosts(newPosts) {
     const feed = document.getElementById("feed")
     let loadMoreTrigger = document.getElementById("loadMoreTrigger")
@@ -249,7 +428,6 @@ class E621Feed {
       postElement.classList.add("post-enter")
       postElement.style.animationDelay = `${index * 0.1}s`
 
-      // Insert before the load more trigger
       if (loadMoreTrigger) {
         feed.insertBefore(postElement, loadMoreTrigger)
       } else {
@@ -264,12 +442,10 @@ class E621Feed {
       loadMoreTrigger.style.visibility = "hidden"
       feed.appendChild(loadMoreTrigger)
 
-      // Re-observe the trigger if it was recreated
       if (this.observer) {
         this.observer.observe(loadMoreTrigger)
       }
     } else {
-      // Ensure it's at the end
       feed.appendChild(loadMoreTrigger)
     }
   }
@@ -368,7 +544,7 @@ class E621Feed {
       <div class="engagement-bar">
         <div class="engagement-item" data-type="reply">
           <svg class="engagement-icon" viewBox="0 0 24 24">
-            <path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01zm8.005-6c-3.317 0-6.005 2.69-6.005 6 0 3.37 2.77 6.08 6.138 6.01l.351-.01h1.761v2.3l5.087-2.81c1.951-1.08 3.163-3.13 3.163-5.36 0-3.39-2.744-6.13-6.129-6.13H9.756z"/>
+            <path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46L18.5 16.45V8c0-1.1-.896-2-2-2z"/>
           </svg>
           <span>${post.comment_count}</span>
         </div>
@@ -380,7 +556,7 @@ class E621Feed {
           <span>${Math.floor(post.score.total * 0.1) || 0}</span>
         </div>
         
-        <div class="engagement-item" data-type="like">
+        <div class="engagement-item" data-type="like" data-post-id="${post.id}">
           <svg class="engagement-icon" viewBox="0 0 24 24">
             <path d="M12 21.638h-.014C9.403 21.59 1.95 14.856 1.95 8.478c0-3.064 2.525-5.754 5.403-5.754 2.29 0 3.83 1.58 4.646 2.73.814-1.148 2.354-2.73 4.645-2.73 2.88 0 5.404 2.69 5.404 5.755 0 6.376-7.454 13.11-10.037 13.157H12zM7.354 4.225c-2.08 0-3.903 1.988-3.903 4.255 0 5.74 7.034 11.596 8.55 11.658 1.518-.062 8.55-5.917 8.55-11.658 0-2.267-1.823-4.255-3.903-4.255-2.528 0-3.94 2.936-3.952 2.965-.23.562-1.156.562-1.387 0-.014-.03-1.425-2.965-3.955-2.965z"/>
           </svg>
@@ -403,6 +579,20 @@ class E621Feed {
     `
 
     return postDiv
+  }
+
+  async loadProfilePicture(postElement, post) {
+    const profilePicElement = postElement.querySelector(".profile-pic")
+    if (!profilePicElement || !post.uploader_id) return
+
+    try {
+      const avatarUrl = await this.getProfilePictureUrl(post)
+      if (avatarUrl) {
+        profilePicElement.innerHTML = `<img src="${avatarUrl}" alt="Profile" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">`
+      }
+    } catch (error) {
+      console.log("Error loading profile picture:", error)
+    }
   }
 
   getRatingText(rating) {
@@ -434,7 +624,7 @@ class E621Feed {
     return num.toString()
   }
 
-  handleEngagement(e) {
+  async handleEngagement(e) {
     const item = e.target.closest(".engagement-item")
     const type = item.dataset.type
     const countElement = item.querySelector("span")
@@ -445,7 +635,7 @@ class E621Feed {
 
     switch (type) {
       case "like":
-        this.toggleLike(item, countElement, currentCount)
+        await this.toggleLike(item, countElement, currentCount)
         break
       case "retweet":
         this.toggleRetweet(item, countElement, currentCount)
@@ -459,16 +649,33 @@ class E621Feed {
     }
   }
 
-  toggleLike(item, countElement, currentCount) {
+  async toggleLike(item, countElement, currentCount) {
+    const postId = item.dataset.postId
     const isLiked = item.classList.contains("liked")
 
+    if (!this.isAuthenticated) {
+      alert("Please log in to add favorites")
+      this.showLogin()
+      return
+    }
+
     if (isLiked) {
-      item.classList.remove("liked")
-      countElement.textContent = this.formatNumber(currentCount - 1)
+      const success = await this.removeFromFavorites(postId)
+      if (success) {
+        item.classList.remove("liked")
+        countElement.textContent = this.formatNumber(currentCount - 1)
+      } else {
+        alert("Failed to remove from favorites. Please check your login credentials.")
+      }
     } else {
-      item.classList.add("liked")
-      countElement.textContent = this.formatNumber(currentCount + 1)
-      this.createHeartAnimation(item)
+      const success = await this.addToFavorites(postId)
+      if (success) {
+        item.classList.add("liked")
+        countElement.textContent = this.formatNumber(currentCount + 1)
+        this.createHeartAnimation(item)
+      } else {
+        alert("Failed to add to favorites. Please check your login credentials.")
+      }
     }
   }
 
@@ -554,8 +761,132 @@ class E621Feed {
 
     e.currentTarget.style.transform = "scale(0.9)"
     setTimeout(() => {
-      e.currentTarget.style.transform = "scale(1)"
+      if (e.currentTarget) {
+        e.currentTarget.style.transform = "scale(1)"
+      }
     }, 150)
+
+    if (navType === "profile") {
+      if (this.isAuthenticated) {
+        this.showProfile()
+      } else {
+        this.showLogin()
+      }
+    } else if (navType === "home") {
+      this.showFeed()
+    }
+  }
+
+  showFeed() {
+    this.currentView = "feed"
+    const feed = document.getElementById("feed")
+    const container = document.querySelector(".app-container")
+
+    const existingForms = container.querySelectorAll(".login-form, .profile-section")
+    existingForms.forEach((form) => form.remove())
+
+    feed.style.display = "block"
+  }
+
+  showLogin() {
+    this.currentView = "login"
+    const feed = document.getElementById("feed")
+    const container = document.querySelector(".app-container")
+
+    feed.style.display = "none"
+
+    const existingForms = container.querySelectorAll(".login-form, .profile-section")
+    existingForms.forEach((form) => form.remove())
+
+    const loginForm = document.createElement("div")
+    loginForm.className = "login-form"
+    loginForm.innerHTML = `
+      <div class="login-container">
+        <h2>Login to e621</h2>
+        <p>Enter your e621 username and API key to enable favorites and other features.</p>
+        <form id="loginForm">
+          <div class="form-group">
+            <label for="username">Username:</label>
+            <input type="text" id="username" name="username" required>
+          </div>
+          <div class="form-group">
+            <label for="apiKey">API Key:</label>
+            <input type="password" id="apiKey" name="apiKey" required>
+            <small>You can get your API key from your <a href="https://e621.net/users/settings" target="_blank">e621 account settings</a></small>
+          </div>
+          <button type="submit">Login</button>
+          <button type="button" id="cancelLogin">Cancel</button>
+        </form>
+      </div>
+    `
+
+    container.appendChild(loginForm)
+
+    document.getElementById("loginForm").addEventListener("submit", async (e) => {
+      e.preventDefault()
+      const username = document.getElementById("username").value
+      const apiKey = document.getElementById("apiKey").value
+
+      const loginBtn = e.target.querySelector('button[type="submit"]')
+      loginBtn.textContent = "Logging in..."
+      loginBtn.disabled = true
+
+      const success = await this.authenticateUser(username, apiKey)
+      if (success) {
+        alert("Login successful!")
+        this.showProfile()
+      } else {
+        alert("Login failed. Please check your credentials.")
+        loginBtn.textContent = "Login"
+        loginBtn.disabled = false
+      }
+    })
+
+    document.getElementById("cancelLogin").addEventListener("click", () => {
+      this.showFeed()
+    })
+  }
+
+  showProfile() {
+    this.currentView = "profile"
+    const feed = document.getElementById("feed")
+    const container = document.querySelector(".app-container")
+
+    feed.style.display = "none"
+
+    const existingForms = container.querySelectorAll(".login-form, .profile-section")
+    existingForms.forEach((form) => form.remove())
+
+    const profileSection = document.createElement("div")
+    profileSection.className = "profile-section"
+    profileSection.innerHTML = `
+      <div class="profile-container">
+        <h2>Profile</h2>
+        <div class="profile-info">
+          <p><strong>Username:</strong> ${this.username}</p>
+          <p><strong>Status:</strong> Logged in</p>
+        </div>
+        <div class="profile-actions">
+          <button id="viewE621Profile">View e621 Profile</button>
+          <button id="logoutBtn">Logout</button>
+          <button id="backToFeed">Back to Feed</button>
+        </div>
+      </div>
+    `
+
+    container.appendChild(profileSection)
+
+    document.getElementById("viewE621Profile").addEventListener("click", () => {
+      window.open(`https://e621.net/users/${this.username}`, "_blank")
+    })
+
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+      this.logout()
+    })
+
+    document.getElementById("backToFeed").addEventListener("click", () => {
+      this.showFeed()
+    })
   }
 
   showLoading() {
