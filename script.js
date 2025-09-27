@@ -514,6 +514,11 @@ class E621Feed {
       </div>
     `
 
+    const isVideo = post.file.ext === "webm" || post.file.ext === "mp4"
+    const mediaElement = isVideo
+      ? `<video src="${post.file.url}" class="post-image" loading="lazy" controls loop muted autoplay></video>`
+      : `<img src="${post.file.url}" alt="Post image" class="post-image" loading="lazy">`
+
     postDiv.innerHTML = `
       <div class="post-header">
         ${profileImageHtml}
@@ -534,7 +539,7 @@ class E621Feed {
         </div>
         
         <div class="post-media">
-          <img src="${post.file.url}" alt="Post image" class="post-image" loading="lazy">
+          ${mediaElement}
           <div class="image-overlay">
             <span class="rating-badge">${rating}</span>
           </div>
