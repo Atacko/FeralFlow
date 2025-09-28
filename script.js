@@ -12,6 +12,8 @@ class E621Feed {
     this.username = null
     this.apiKey = null
     this.currentView = "feed"
+    this.userBlacklist = []
+    this.blacklistLoaded = false
 
     this.init()
   }
@@ -32,6 +34,7 @@ class E621Feed {
         this.apiKey = auth.apiKey
         this.isAuthenticated = true
         console.log("User authenticated as:", this.username)
+        this.loadUserBlacklist()
       } catch (error) {
         console.log("Invalid saved auth, clearing")
         localStorage.removeItem("e621_auth")
@@ -39,106 +42,180 @@ class E621Feed {
     }
   }
 
-  saveAuth(username, apiKey) {
+  async saveAuth(username, apiKey) {
     this.username = username
     this.apiKey = apiKey
     this.isAuthenticated = true
     localStorage.setItem("e621_auth", JSON.stringify({ username, apiKey }))
+    this.loadUserBlacklist()
   }
 
   logout() {
     this.username = null
     this.apiKey = null
     this.isAuthenticated = false
+    this.userBlacklist = []
+    this.blacklistLoaded = false
     localStorage.removeItem("e621_auth")
     this.showFeed()
   }
 
-  async authenticateUser(username, apiKey) {
+  async loadUserBlacklist() {
+    if (!this.isAuthenticated || !this.username || !this.apiKey) {
+      console.log("Not authenticated, skipping blacklist load")
+      return
+    }
+
     try {
-      if (!username || !apiKey || username.trim() === "" || apiKey.trim() === "") {
-        return false
+      console.log("Loading blacklist for user:", this.username)
+
+      const savedBlacklist = localStorage.getItem(`e621_blacklist_${this.username}`)
+      if (savedBlacklist) {
+        try {
+          const blacklistData = JSON.parse(savedBlacklist)
+          this.userBlacklist = blacklistData.tags || []
+          this.blacklistLoaded = true
+          console.log("Successfully loaded", this.userBlacklist.length, "blacklisted tags from storage")
+
+          if (this.posts.length > 0) {
+            console.log("Applying blacklist to current posts")
+            this.applyBlacklistToCurrentPosts()
+          }
+          return
+        } catch (error) {
+          console.log("Invalid saved blacklist, will use empty blacklist")
+        }
       }
 
-      if (apiKey.length < 20) {
-        return false
-      }
-
-      this.saveAuth(username.trim(), apiKey.trim())
-      return true
+      console.log("No saved blacklist found, starting with empty blacklist")
+      this.userBlacklist = []
+      this.blacklistLoaded = true
     } catch (error) {
-      console.error("Authentication error:", error)
-      return false
+      console.error("Error loading user blacklist:", error)
+      this.userBlacklist = []
+      this.blacklistLoaded = true
     }
   }
 
-  async addToFavorites(postId) {
-    if (!this.isAuthenticated) {
-      alert("Please log in to add favorites")
-      return false
+  saveUserBlacklist() {
+    if (!this.isAuthenticated || !this.username) {
+      return
     }
 
-    try {
-      const favoriteUrl = `https://e621.net/favorites.json`
+    const blacklistData = {
+      tags: this.userBlacklist,
+      lastUpdated: new Date().toISOString(),
+    }
 
-      const response = await fetch(favoriteUrl, {
-        method: "POST",
-        headers: {
-          "User-Agent": "E621Feed/1.0 (by " + this.username + " on e621)",
-          Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: `post_id=${postId}`,
-      })
+    localStorage.setItem(`e621_blacklist_${this.username}`, JSON.stringify(blacklistData))
+    console.log("Saved blacklist with", this.userBlacklist.length, "tags")
+  }
 
-      if (response.ok) {
-        return true
-      } else if (response.status === 401) {
-        alert("Authentication failed. Please check your login credentials.")
-        this.logout()
-        return false
-      } else {
-        console.error("Favorites API error:", response.status)
-        return false
-      }
-    } catch (error) {
-      console.error("Error adding to favorites:", error)
-      return true
+  updateBlacklist(blacklistText) {
+    if (!blacklistText || typeof blacklistText !== "string") {
+      this.userBlacklist = []
+    } else {
+      this.userBlacklist = blacklistText
+        .split(/[\n\r]+/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"))
+        .map((line) => line.toLowerCase())
+    }
+
+    this.blacklistLoaded = true
+    this.saveUserBlacklist()
+
+    console.log("Updated blacklist with", this.userBlacklist.length, "tags")
+
+    if (this.posts.length > 0) {
+      this.applyBlacklistToCurrentPosts()
     }
   }
 
-  async removeFromFavorites(postId) {
-    if (!this.isAuthenticated) {
-      alert("Please log in to manage favorites")
+  parseBlacklistFromHTML(htmlContent) {
+    try {
+      const blacklistRegex = /<textarea[^>]*name=["']user\[blacklisted_tags\]["'][^>]*>([\s\S]*?)<\/textarea>/i
+      const match = htmlContent.match(blacklistRegex)
+
+      if (match && match[1]) {
+        const blacklistText = match[1]
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&amp;/g, "&")
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .trim()
+
+        console.log("Found blacklist in textarea:", blacklistText.length, "characters")
+        return blacklistText
+      }
+
+      const textareaRegex = /<textarea[^>]*>([\s\S]*?)<\/textarea>/gi
+      let textareaMatch
+      while ((textareaMatch = textareaRegex.exec(htmlContent)) !== null) {
+        const content = textareaMatch[1].trim()
+        if (
+          content.length > 10 &&
+          (content.includes("rating:") || content.includes("species:") || content.includes("_"))
+        ) {
+          console.log("Found potential blacklist in textarea:", content.length, "characters")
+          return content
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&amp;/g, "&")
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+        }
+      }
+
+      console.log("No blacklist textarea found in HTML")
+      return ""
+    } catch (error) {
+      console.error("Error parsing blacklist from HTML:", error)
+      return ""
+    }
+  }
+
+  isPostBlacklisted(post) {
+    if (!this.blacklistLoaded || this.userBlacklist.length === 0) {
       return false
     }
 
-    try {
-      const favoriteUrl = `https://e621.net/favorites/${postId}.json`
+    const allPostTags = [
+      ...(post.tags.general || []),
+      ...(post.tags.species || []),
+      ...(post.tags.character || []),
+      ...(post.tags.artist || []),
+      ...(post.tags.copyright || []),
+      ...(post.tags.meta || []),
+    ].map((tag) => tag.toLowerCase())
 
-      const response = await fetch(favoriteUrl, {
-        method: "DELETE",
-        headers: {
-          "User-Agent": "E621Feed/1.0 (by " + this.username + " on e621)",
-          Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
-        },
-      })
-
-      if (response.ok) {
+    for (const blacklistedTag of this.userBlacklist) {
+      if (allPostTags.includes(blacklistedTag)) {
+        console.log("Post", post.id, "filtered by blacklisted tag:", blacklistedTag)
         return true
-      } else if (response.status === 401) {
-        alert("Authentication failed. Please check your login credentials.")
-        this.logout()
-        return false
-      } else if (response.status === 404) {
-        return true
-      } else {
-        console.error("Remove favorites API error:", response.status)
-        return false
       }
-    } catch (error) {
-      console.error("Error removing from favorites:", error)
-      return true
+    }
+
+    return false
+  }
+
+  applyBlacklistToCurrentPosts() {
+    const postElements = document.querySelectorAll(".post")
+    let hiddenCount = 0
+
+    postElements.forEach((postElement) => {
+      const postId = postElement.dataset.postId
+      const post = this.posts.find((p) => p.id.toString() === postId)
+
+      if (post && this.isPostBlacklisted(post)) {
+        postElement.style.display = "none"
+        hiddenCount++
+      }
+    })
+
+    if (hiddenCount > 0) {
+      console.log("Hidden", hiddenCount, "posts due to blacklist")
     }
   }
 
@@ -146,7 +223,6 @@ class E621Feed {
     const searchInput = document.getElementById("searchInput")
     const searchBtn = document.getElementById("searchBtn")
 
-    // Search functionality
     searchBtn.addEventListener("click", () => this.handleSearch())
     searchInput.addEventListener("keypress", (e) => {
       if (e.key === "Enter") {
@@ -154,12 +230,10 @@ class E621Feed {
       }
     })
 
-    // Navigation
     document.querySelectorAll(".nav-btn").forEach((btn) => {
       btn.addEventListener("click", (e) => this.handleNavigation(e))
     })
 
-    // Post interactions
     document.addEventListener("click", (e) => {
       if (e.target.closest(".engagement-item")) {
         this.handleEngagement(e)
@@ -250,28 +324,42 @@ class E621Feed {
 
       console.log("Received posts:", posts.length)
 
-      if (posts.length === 0) {
+      let filteredPosts = posts
+      if (this.isAuthenticated && this.blacklistLoaded) {
+        const originalCount = posts.length
+        filteredPosts = posts.filter((post) => !this.isPostBlacklisted(post))
+        const filteredCount = originalCount - filteredPosts.length
+        if (filteredCount > 0) {
+          console.log("Filtered out", filteredCount, "posts due to blacklist")
+        }
+      }
+
+      if (filteredPosts.length === 0) {
         console.log("No posts found for page", this.currentPage)
 
         if (this.currentPage > 1) {
           console.log("Resetting to page 1 for endless scroll")
           this.currentPage = 1
           const resetPosts = await this.fetchE621Posts(tagsToUse, 1)
-          if (resetPosts.length > 0) {
-            console.log("Reset successful, got", resetPosts.length, "posts")
-            this.posts = [...this.posts, ...resetPosts]
-            this.renderNewPosts(resetPosts)
+          let resetFilteredPosts = resetPosts
+          if (this.isAuthenticated && this.blacklistLoaded) {
+            resetFilteredPosts = resetPosts.filter((post) => !this.isPostBlacklisted(post))
+          }
+          if (resetFilteredPosts.length > 0) {
+            console.log("Reset successful, got", resetFilteredPosts.length, "posts")
+            this.posts = [...this.posts, ...resetFilteredPosts]
+            this.renderNewPosts(resetFilteredPosts)
           }
         }
       } else {
         if (this.currentPage === 1 && this.posts.length === 0) {
           console.log("First page, replacing all posts")
-          this.posts = posts
+          this.posts = filteredPosts
           this.renderPosts()
         } else {
-          console.log("Additional page, appending", posts.length, "posts")
-          this.posts = [...this.posts, ...posts]
-          this.renderNewPosts(posts)
+          console.log("Additional page, appending", filteredPosts.length, "posts")
+          this.posts = [...this.posts, ...filteredPosts]
+          this.renderNewPosts(filteredPosts)
         }
       }
 
@@ -318,7 +406,7 @@ class E621Feed {
           }
 
           const controller = new AbortController()
-          const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+          const timeoutId = setTimeout(() => controller.abort(), 10000)
 
           const response = await fetch(proxyUrl, {
             method: "GET",
@@ -387,17 +475,14 @@ class E621Feed {
           console.error(`Error with proxy ${proxy}:`, error)
           lastError = error
 
-          // If it's a timeout or network error, try next proxy immediately
           if (error.name === "AbortError" || error.message.includes("Failed to fetch")) {
             continue
           }
 
-          // For other errors, wait a bit before trying next proxy
           await new Promise((resolve) => setTimeout(resolve, 1000))
         }
       }
 
-      // Wait before next attempt
       if (attempt < 2) {
         console.log(`All proxies failed, waiting before retry attempt ${attempt + 2}`)
         await new Promise((resolve) => setTimeout(resolve, 2000))
@@ -602,7 +687,7 @@ class E621Feed {
       <div class="engagement-bar">
         <div class="engagement-item" data-type="reply">
           <svg class="engagement-icon" viewBox="0 0 24 24">
-            <path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46L18.5 16.45V8c0-1.1-.896-2-2-2z"/>
+            <path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01zm8.005-6c-3.317 0-6.005 2.69-6.005 6 0 3.37 2.77 6.08 6.138 6.01l.351-.01h1.761v2.3l5.087-2.81c1.951-1.08 3.163-3.13 3.163-5.36 0-3.39-2.744-6.13-6.129-6.13H9.756z"/>
           </svg>
           <span>${post.comment_count}</span>
         </div>
@@ -923,16 +1008,60 @@ class E621Feed {
         <div class="profile-info">
           <p><strong>Username:</strong> ${this.username}</p>
           <p><strong>Status:</strong> Logged in</p>
+          <p><strong>Blacklist:</strong> ${this.blacklistLoaded ? `${this.userBlacklist.length} tags` : "Loading..."}</p>
         </div>
+        
+        <div class="blacklist-section">
+          <h3>Manage Blacklist</h3>
+          <p>Enter tags you want to filter out, one per line:</p>
+          <textarea id="blacklistInput" placeholder="Enter blacklisted tags, one per line...
+Example:
+gore
+scat
+watersports
+young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
+          <div class="blacklist-actions">
+            <button id="saveBlacklist" class="profile-btn">Save Blacklist</button>
+            <button id="clearBlacklist" class="profile-btn secondary">Clear All</button>
+          </div>
+          <small>Note: Since e621's API doesn't provide access to user blacklists, you'll need to manually copy your blacklist from your <a href="https://e621.net/users/settings" target="_blank">e621 account settings</a>.</small>
+        </div>
+        
         <div class="profile-actions">
-          <button id="viewE621Profile">View e621 Profile</button>
-          <button id="logoutBtn">Logout</button>
-          <button id="backToFeed">Back to Feed</button>
+          <button id="viewE621Profile" class="profile-btn">View e621 Profile</button>
+          <button id="logoutBtn" class="profile-btn">Logout</button>
+          <button id="backToFeed" class="profile-btn">Back to Feed</button>
         </div>
       </div>
     `
 
     container.appendChild(profileSection)
+
+    document.getElementById("saveBlacklist").addEventListener("click", () => {
+      const blacklistText = document.getElementById("blacklistInput").value
+      this.updateBlacklist(blacklistText)
+
+      const blacklistInfo = document.querySelector(".profile-info p:last-child")
+      if (blacklistInfo) {
+        blacklistInfo.innerHTML = `<strong>Blacklist:</strong> ${this.userBlacklist.length} tags`
+      }
+
+      alert(`Blacklist updated! Now filtering ${this.userBlacklist.length} tags.`)
+    })
+
+    document.getElementById("clearBlacklist").addEventListener("click", () => {
+      if (confirm("Are you sure you want to clear your entire blacklist?")) {
+        document.getElementById("blacklistInput").value = ""
+        this.updateBlacklist("")
+
+        const blacklistInfo = document.querySelector(".profile-info p:last-child")
+        if (blacklistInfo) {
+          blacklistInfo.innerHTML = `<strong>Blacklist:</strong> 0 tags`
+        }
+
+        alert("Blacklist cleared!")
+      }
+    })
 
     document.getElementById("viewE621Profile").addEventListener("click", () => {
       window.open(`https://e621.net/users/${this.username}`, "_blank")
@@ -973,6 +1102,107 @@ class E621Feed {
         <button class="retry-btn" onclick="location.reload()">Retry</button>
       </div>
     `
+  }
+
+  async addToFavorites(postId) {
+    if (!this.isAuthenticated) {
+      alert("Please log in to add favorites")
+      return false
+    }
+
+    try {
+      const favoriteUrl = `https://e621.net/favorites.json`
+
+      const response = await fetch(favoriteUrl, {
+        method: "POST",
+        headers: {
+          "User-Agent": "E621Feed/1.0 (by " + this.username + " on e621)",
+          Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: `post_id=${postId}`,
+      })
+
+      if (response.ok) {
+        return true
+      } else if (response.status === 401) {
+        alert("Authentication failed. Please check your login credentials.")
+        this.logout()
+        return false
+      } else {
+        console.error("Favorites API error:", response.status)
+        return false
+      }
+    } catch (error) {
+      console.error("Error adding to favorites:", error)
+      return true
+    }
+  }
+
+  async removeFromFavorites(postId) {
+    if (!this.isAuthenticated) {
+      alert("Please log in to manage favorites")
+      return false
+    }
+
+    try {
+      const favoriteUrl = `https://e621.net/favorites/${postId}.json`
+
+      const response = await fetch(favoriteUrl, {
+        method: "DELETE",
+        headers: {
+          "User-Agent": "E621Feed/1.0 (by " + this.username + " on e621)",
+          Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
+        },
+      })
+
+      if (response.ok) {
+        return true
+      } else if (response.status === 401) {
+        alert("Authentication failed. Please check your login credentials.")
+        this.logout()
+        return false
+      } else if (response.status === 404) {
+        return true
+      } else {
+        console.error("Remove favorites API error:", response.status)
+        return false
+      }
+    } catch (error) {
+      console.error("Error removing from favorites:", error)
+      return true
+    }
+  }
+
+  async authenticateUser(username, apiKey) {
+    try {
+      const testUrl = `https://e621.net/users/${username}.json`
+
+      const response = await fetch(testUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": "E621Feed/1.0 (by " + username + " on e621)",
+          Authorization: "Basic " + btoa(username + ":" + apiKey),
+          "Content-Type": "application/json",
+        },
+      })
+
+      if (response.ok) {
+        await this.saveAuth(username, apiKey)
+        return true
+      } else if (response.status === 401) {
+        console.error("Authentication failed: Invalid credentials")
+        return false
+      } else {
+        console.error("Authentication test failed:", response.status)
+        await this.saveAuth(username, apiKey)
+        return true
+      }
+    } catch (error) {
+      console.error("Authentication error:", error)
+      await this.saveAuth(username, apiKey)
+      return true
+    }
   }
 }
 
