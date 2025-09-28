@@ -239,6 +239,12 @@ class E621Feed {
         this.handleEngagement(e)
       }
     })
+
+    document.addEventListener("click", (e) => {
+      if (e.target.classList.contains("post-image") && e.target.tagName === "IMG") {
+        this.openFullscreenImage(e.target)
+      }
+    })
   }
 
   setupInfiniteScroll() {
@@ -1203,6 +1209,48 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
       await this.saveAuth(username, apiKey)
       return true
     }
+  }
+
+  openFullscreenImage(imageElement) {
+    const modal = document.createElement("div")
+    modal.className = "fullscreen-modal"
+
+    const fullscreenImg = document.createElement("img")
+    fullscreenImg.className = "fullscreen-image"
+    fullscreenImg.src = imageElement.src
+    fullscreenImg.alt = imageElement.alt
+
+    const closeBtn = document.createElement("button")
+    closeBtn.className = "fullscreen-close"
+    closeBtn.innerHTML = "×"
+
+    modal.appendChild(fullscreenImg)
+    modal.appendChild(closeBtn)
+
+    document.body.appendChild(modal)
+
+    const closeModal = () => {
+      document.body.removeChild(modal)
+    }
+
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation()
+      closeModal()
+    })
+
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) {
+        closeModal()
+      }
+    })
+
+    const handleEscape = (e) => {
+      if (e.key === "Escape") {
+        closeModal()
+        document.removeEventListener("keydown", handleEscape)
+      }
+    }
+    document.addEventListener("keydown", handleEscape)
   }
 }
 
