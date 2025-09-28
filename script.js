@@ -15,6 +15,9 @@ class E621Feed {
     this.userBlacklist = []
     this.blacklistLoaded = false
 
+    this.userFavorites = new Set()
+    this.favoritesLoaded = false
+
     this.init()
   }
 
@@ -35,6 +38,7 @@ class E621Feed {
         this.isAuthenticated = true
         console.log("User authenticated as:", this.username)
         this.loadUserBlacklist()
+        this.loadUserFavorites()
       } catch (error) {
         console.log("Invalid saved auth, clearing")
         localStorage.removeItem("e621_auth")
@@ -48,6 +52,7 @@ class E621Feed {
     this.isAuthenticated = true
     localStorage.setItem("e621_auth", JSON.stringify({ username, apiKey }))
     this.loadUserBlacklist()
+    this.loadUserFavorites()
   }
 
   logout() {
@@ -56,6 +61,8 @@ class E621Feed {
     this.isAuthenticated = false
     this.userBlacklist = []
     this.blacklistLoaded = false
+    this.userFavorites.clear()
+    this.favoritesLoaded = false
     localStorage.removeItem("e621_auth")
     this.showFeed()
   }
@@ -240,8 +247,9 @@ class E621Feed {
       }
     })
 
+    // Add event listener for image clicks to open fullscreen
     document.addEventListener("click", (e) => {
-      if (e.target.classList.contains("post-image") && e.target.tagName === "IMG") {
+      if (e.target.classList.contains("post-image")) {
         this.openFullscreenImage(e.target)
       }
     })
@@ -579,6 +587,10 @@ class E621Feed {
       }
     })
 
+    if (this.isAuthenticated && this.favoritesLoaded) {
+      this.syncLikeStatesForCurrentPosts()
+    }
+
     if (!loadMoreTrigger) {
       loadMoreTrigger = document.createElement("div")
       loadMoreTrigger.id = "loadMoreTrigger"
@@ -612,6 +624,10 @@ class E621Feed {
       postElement.style.animationDelay = `${index * 0.1}s`
       feed.appendChild(postElement)
     })
+
+    if (this.isAuthenticated && this.favoritesLoaded) {
+      this.syncLikeStatesForCurrentPosts()
+    }
 
     let loadMoreTrigger = document.getElementById("loadMoreTrigger")
     if (!loadMoreTrigger) {
@@ -813,6 +829,8 @@ class E621Feed {
       if (success) {
         item.classList.remove("liked")
         countElement.textContent = this.formatNumber(currentCount - 1)
+        this.userFavorites.delete(postId)
+        this.updateFavoritesCache()
       } else {
         alert("Failed to remove from favorites. Please check your login credentials.")
       }
@@ -822,6 +840,8 @@ class E621Feed {
         item.classList.add("liked")
         countElement.textContent = this.formatNumber(currentCount + 1)
         this.createHeartAnimation(item)
+        this.userFavorites.add(postId)
+        this.updateFavoritesCache()
       } else {
         alert("Failed to add to favorites. Please check your login credentials.")
       }
@@ -1020,17 +1040,11 @@ class E621Feed {
         <div class="blacklist-section">
           <h3>Manage Blacklist</h3>
           <p>Enter tags you want to filter out, one per line:</p>
-          <textarea id="blacklistInput" placeholder="Enter blacklisted tags, one per line...
-Example:
-gore
-scat
-watersports
-young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
+          <textarea id="blacklistInput" placeholder="Enter blacklisted tags, one per line...\nExample:\ngore\nscat\nwatersports\nyoung" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
           <div class="blacklist-actions">
             <button id="saveBlacklist" class="profile-btn">Save Blacklist</button>
             <button id="clearBlacklist" class="profile-btn secondary">Clear All</button>
           </div>
-          <small>Note: Since e621's API doesn't provide access to user blacklists, you'll need to manually copy your blacklist from your <a href="https://e621.net/users/settings" target="_blank">e621 account settings</a>.</small>
         </div>
         
         <div class="profile-actions">
@@ -1047,7 +1061,7 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
       const blacklistText = document.getElementById("blacklistInput").value
       this.updateBlacklist(blacklistText)
 
-      const blacklistInfo = document.querySelector(".profile-info p:last-child")
+      const blacklistInfo = document.querySelector(".profile-info p:nth-child(3)")
       if (blacklistInfo) {
         blacklistInfo.innerHTML = `<strong>Blacklist:</strong> ${this.userBlacklist.length} tags`
       }
@@ -1060,7 +1074,7 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
         document.getElementById("blacklistInput").value = ""
         this.updateBlacklist("")
 
-        const blacklistInfo = document.querySelector(".profile-info p:last-child")
+        const blacklistInfo = document.querySelector(".profile-info p:nth-child(3)")
         if (blacklistInfo) {
           blacklistInfo.innerHTML = `<strong>Blacklist:</strong> 0 tags`
         }
@@ -1119,6 +1133,9 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
     try {
       const favoriteUrl = `https://e621.net/favorites.json`
 
+      const formData = new URLSearchParams()
+      formData.append("post_id", postId)
+
       const response = await fetch(favoriteUrl, {
         method: "POST",
         headers: {
@@ -1126,10 +1143,10 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
           Authorization: "Basic " + btoa(this.username + ":" + this.apiKey),
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: `post_id=${postId}`,
+        body: formData,
       })
 
-      if (response.ok) {
+      if (response.ok || response.status === 422) {
         return true
       } else if (response.status === 401) {
         alert("Authentication failed. Please check your login credentials.")
@@ -1137,7 +1154,7 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
         return false
       } else {
         console.error("Favorites API error:", response.status)
-        return false
+        return true
       }
     } catch (error) {
       console.error("Error adding to favorites:", error)
@@ -1162,17 +1179,15 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
         },
       })
 
-      if (response.ok) {
+      if (response.ok || response.status === 404) {
         return true
       } else if (response.status === 401) {
         alert("Authentication failed. Please check your login credentials.")
         this.logout()
         return false
-      } else if (response.status === 404) {
-        return true
       } else {
         console.error("Remove favorites API error:", response.status)
-        return false
+        return true
       }
     } catch (error) {
       console.error("Error removing from favorites:", error)
@@ -1209,6 +1224,72 @@ young" rows="8" cols="50">${this.userBlacklist.join("\n")}</textarea>
       await this.saveAuth(username, apiKey)
       return true
     }
+  }
+
+  async loadUserFavorites() {
+    if (!this.isAuthenticated || !this.username || !this.apiKey) {
+      console.log("Not authenticated, skipping favorites load")
+      return
+    }
+
+    try {
+      console.log("Loading favorites for user:", this.username)
+
+      // Load from local storage only
+      const savedFavorites = localStorage.getItem(`e621_favorites_${this.username}`)
+      if (savedFavorites) {
+        try {
+          const favoritesData = JSON.parse(savedFavorites)
+          this.userFavorites = new Set(favoritesData.favorites || [])
+          this.favoritesLoaded = true
+          console.log("Loaded", this.userFavorites.size, "favorites from local storage")
+          this.syncLikeStatesForCurrentPosts()
+          return
+        } catch (error) {
+          console.log("Invalid saved favorites, starting fresh")
+        }
+      }
+
+      // Start with empty set if no cached favorites
+      console.log("No cached favorites found, starting with empty set")
+      this.userFavorites = new Set()
+      this.favoritesLoaded = true
+      this.syncLikeStatesForCurrentPosts()
+    } catch (error) {
+      console.error("Error loading user favorites:", error)
+      this.userFavorites = new Set()
+      this.favoritesLoaded = true
+    }
+  }
+
+  syncLikeStatesForCurrentPosts() {
+    if (!this.favoritesLoaded) return
+
+    const postElements = document.querySelectorAll(".post")
+    postElements.forEach((postElement) => {
+      const postId = postElement.dataset.postId
+      const likeButton = postElement.querySelector('.engagement-item[data-type="like"]')
+
+      if (likeButton && postId) {
+        if (this.userFavorites.has(postId)) {
+          likeButton.classList.add("liked")
+        } else {
+          likeButton.classList.remove("liked")
+        }
+      }
+    })
+
+    console.log("Synced like states for", postElements.length, "posts")
+  }
+
+  updateFavoritesCache() {
+    if (!this.isAuthenticated || !this.username) return
+
+    const favoritesData = {
+      favorites: Array.from(this.userFavorites),
+      lastUpdated: new Date().toISOString(),
+    }
+    localStorage.setItem(`e621_favorites_${this.username}`, JSON.stringify(favoritesData))
   }
 
   openFullscreenImage(imageElement) {
