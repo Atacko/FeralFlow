@@ -278,6 +278,7 @@ class E621Feed {
       console.log("Total posts loaded:", this.posts.length)
     } catch (error) {
       console.error("Error loading posts:", error)
+      this.showError(error.message)
     } finally {
       this.isLoading = false
       this.hideLoading()
@@ -292,75 +293,127 @@ class E621Feed {
       page: page.toString(),
     })
 
-    try {
-      console.log("Fetching posts with URL:", baseUrl + "?" + params.toString())
+    const proxies = [
+      "https://api.allorigins.win/get?url=",
+      "https://cors-anywhere.herokuapp.com/",
+      "https://api.codetabs.com/v1/proxy?quest=",
+    ]
 
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(baseUrl + "?" + params.toString())}`
+    let lastError = null
 
-      const response = await fetch(proxyUrl, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      })
+    for (let attempt = 0; attempt < 3; attempt++) {
+      for (const proxy of proxies) {
+        try {
+          console.log(`Attempt ${attempt + 1} with proxy: ${proxy}`)
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+          const targetUrl = baseUrl + "?" + params.toString()
+          let proxyUrl
+
+          if (proxy.includes("allorigins")) {
+            proxyUrl = `${proxy}${encodeURIComponent(targetUrl)}`
+          } else if (proxy.includes("codetabs")) {
+            proxyUrl = `${proxy}${encodeURIComponent(targetUrl)}`
+          } else {
+            proxyUrl = proxy + targetUrl
+          }
+
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
+          const response = await fetch(proxyUrl, {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            signal: controller.signal,
+          })
+
+          clearTimeout(timeoutId)
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`)
+          }
+
+          const data = await response.json()
+          let e621Data
+
+          if (proxy.includes("allorigins")) {
+            e621Data = JSON.parse(data.contents)
+          } else {
+            e621Data = data
+          }
+
+          console.log("API Response received, posts count:", e621Data?.posts?.length || 0)
+
+          if (e621Data && e621Data.posts) {
+            const posts = e621Data.posts
+
+            console.log("Posts available:", posts.length)
+
+            return posts
+              .map((post) => ({
+                id: post.id,
+                file: {
+                  url: post.file?.url,
+                  ext: post.file?.ext || "jpg",
+                },
+                preview: {
+                  url: post.preview?.url,
+                },
+                tags: {
+                  general: post.tags?.general || [],
+                  species: post.tags?.species || [],
+                  character: post.tags?.character || [],
+                  artist: post.tags?.artist || [],
+                },
+                score: {
+                  up: post.score?.up || 0,
+                  down: post.score?.down || 0,
+                  total: post.score?.total || 0,
+                },
+                fav_count: post.fav_count || 0,
+                comment_count: post.comment_count || 0,
+                created_at: post.created_at,
+                rating: post.rating || "s",
+                description: post.description || "",
+                uploader_id: post.uploader_id,
+                uploader_name: post.uploader_name || "Anonymous",
+              }))
+              .filter((post) => post.file.url)
+          } else {
+            throw new Error("Invalid API response format")
+          }
+        } catch (error) {
+          console.error(`Error with proxy ${proxy}:`, error)
+          lastError = error
+
+          // If it's a timeout or network error, try next proxy immediately
+          if (error.name === "AbortError" || error.message.includes("Failed to fetch")) {
+            continue
+          }
+
+          // For other errors, wait a bit before trying next proxy
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
       }
 
-      const data = await response.json()
-      const e621Data = JSON.parse(data.contents)
-
-      console.log("API Response received, posts count:", e621Data?.posts?.length || 0)
-
-      if (e621Data && e621Data.posts) {
-        const posts = e621Data.posts
-
-        console.log("Posts available:", posts.length)
-
-        return posts
-          .map((post) => ({
-            id: post.id,
-            file: {
-              url: post.file?.url,
-              ext: post.file?.ext || "jpg",
-            },
-            preview: {
-              url: post.preview?.url,
-            },
-            tags: {
-              general: post.tags?.general || [],
-              species: post.tags?.species || [],
-              character: post.tags?.character || [],
-              artist: post.tags?.artist || [],
-            },
-            score: {
-              up: post.score?.up || 0,
-              down: post.score?.down || 0,
-              total: post.score?.total || 0,
-            },
-            fav_count: post.fav_count || 0,
-            comment_count: post.comment_count || 0,
-            created_at: post.created_at,
-            rating: post.rating || "s",
-            description: post.description || "",
-            uploader_id: post.uploader_id,
-            uploader_name: post.uploader_name || "Anonymous",
-          }))
-          .filter((post) => post.file.url)
-      } else {
-        throw new Error("Invalid API response format")
+      // Wait before next attempt
+      if (attempt < 2) {
+        console.log(`All proxies failed, waiting before retry attempt ${attempt + 2}`)
+        await new Promise((resolve) => setTimeout(resolve, 2000))
       }
-    } catch (error) {
-      console.error("API Error:", error)
+    }
 
-      if (error.message.includes("HTTP error")) {
-        throw new Error("Failed to connect to e621. Please check your internet connection.")
-      } else if (error.message.includes("Invalid API response")) {
-        throw new Error("Received invalid data from e621. Please try again.")
-      } else {
-        throw new Error("Unable to load posts from e621. Please try again later.")
-      }
+    console.error("All API attempts failed:", lastError)
+
+    if (lastError?.name === "AbortError") {
+      throw new Error("Request timed out. Please check your internet connection and try again.")
+    } else if (lastError?.message.includes("HTTP error")) {
+      throw new Error("Unable to connect to e621. The service may be temporarily unavailable.")
+    } else if (lastError?.message.includes("Invalid API response")) {
+      throw new Error("Received invalid data from e621. Please try again in a moment.")
+    } else {
+      throw new Error("Unable to load posts from e621. Please try again later.")
     }
   }
 
@@ -516,7 +569,7 @@ class E621Feed {
 
     const isVideo = post.file.ext === "webm" || post.file.ext === "mp4"
     const mediaElement = isVideo
-      ? `<video src="${post.file.url}" class="post-image" loading="lazy" controls loop muted autoplay></video>`
+      ? `<video src="${post.file.url}" class="post-image" loading="lazy" controls loop muted preload="metadata"></video>`
       : `<img src="${post.file.url}" alt="Post image" class="post-image" loading="lazy">`
 
     postDiv.innerHTML = `
